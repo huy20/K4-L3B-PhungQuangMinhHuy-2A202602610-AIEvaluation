@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+from openai import OpenAI, OpenAIError, RateLimitError
 
 load_dotenv(Path(__file__).resolve().with_name(".env"))
 
@@ -266,6 +266,55 @@ class OpenAIGenerator:
         return answer
 
 
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+class GeminiGenerator:
+    """TextGenerator backed by Google Gemini's OpenAI-compatible endpoint.
+
+    The compatibility layer exposes chat.completions (not the OpenAI Responses
+    API), so this generator uses chat completions.
+    """
+
+    def __init__(self, max_output_tokens: int = 512) -> None:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.model = os.getenv("GEMINI_MODEL", "").strip()
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is missing from .env")
+        if not self.model:
+            raise RuntimeError("GEMINI_MODEL is missing from .env")
+        self.client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+        self.max_output_tokens = max_output_tokens
+
+    def generate(self, prompt: str) -> str:
+        for attempt in range(5):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                    max_tokens=self.max_output_tokens,
+                )
+                break
+            except RateLimitError:
+                if attempt == 4:
+                    raise
+                time.sleep(60)
+        answer = (response.choices[0].message.content or "").strip()
+        if not answer:
+            raise RuntimeError("Gemini returned an empty answer")
+        return answer
+
+
+def build_default_generator() -> TextGenerator:
+    """Select the generation backend from MODEL_PROVIDER (default: openai)."""
+
+    provider = os.getenv("MODEL_PROVIDER", "openai").strip().lower()
+    if provider == "gemini":
+        return GeminiGenerator()
+    return OpenAIGenerator()
+
+
 @dataclass(frozen=True)
 class DomainResponse:
     question: str
@@ -299,7 +348,7 @@ class DomainAssistant:
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            generator if generator is not None else build_default_generator(),
             top_k,
         )
 
